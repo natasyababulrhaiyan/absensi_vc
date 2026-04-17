@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+  <head>
+    <title>FaceAttend VC</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
+    />
+  </head>
+  <body class="admin-page">
+    <div class="layout">
+      <!-- SIDEBAR -->
+      <div class="sidebar">
+        <!-- HEADER -->
+        <div class="sidebar-header">
+          <img src="/static/logo.png" class="logo-sidebar" />
+          <span class="brand-name">FaceAttend VC</span>
+        </div>
+
+        <!-- MENU -->
+        <ul class="menu">
+          <li class="active">
+            <i class="fa fa-home"></i>
+            <span>Dashboard</span>
+          </li>
+
+          <li>
+            <i class="fa fa-users"></i>
+            <span>Data Peserta</span>
+          </li>
+
+          <li>
+            <i class="fa fa-table"></i>
+            <span>Data Absensi</span>
+          </li>
+        </ul>
+
+        <!-- SECTION -->
+        <p class="menu-title">PAGES</p>
+
+        <ul class="menu">
+          <li onclick="window.location.href = '/logout'">
+            <i class="fa fa-sign-out-alt"></i>
+            <span>Logout</span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- MAIN -->
+      <div class="main">
+        <!-- HEADER -->
+        <div class="header">
+          <div class="header-right">
+            <!-- SEARCH -->
+            <div class="search-box">
+              <i class="fa fa-search"></i>
+              <input type="text" placeholder="Search..." />
+            </div>
+
+            <!-- ICON -->
+            <div class="header-icons">
+              <i class="fa fa-bell"></i>
+              <i class="fa fa-gear"></i>
+            </div>
+
+            <!-- PROFILE -->
+            <div class="profile">
+              <img src="/static/profile.png" alt="profile" />
+              <span>{{ session['nama'] }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CONTENT -->
+        <div class="content">
+          <div class="cards">
+            <div class="card-box">
+              <i class="fa fa-users"></i>
+              <h4>Total Mahasiswa</h4>
+              <p>{{ data|length }}</p>
+            </div>
+
+            <div class="card-box">
+              <i class="fa fa-check-circle"></i>
+              <h4>Hadir</h4>
+              <p>
+                {{ data | selectattr('status','equalto','hadir') | list | length
+                }}
+              </p>
+            </div>
+
+            <div class="card-box">
+              <i class="fa fa-times-circle"></i>
+              <h4>Spoof</h4>
+              <p>
+                {{ data | selectattr('status','equalto','spoof') | list | length
+                }}
+              </p>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Grafik Absensi</h3>
+
+            <div class="chart-container">
+              <canvas id="chartAbsensi"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+  const hadir = {{ data | selectattr('status','equalto','hadir') | list | length }};
+  const spoof = {{ data | selectattr('status','equalto','spoof') | list | length }};
+
+  new Chart(document.getElementById('chartAbsensi'), {
+      type: 'doughnut',
+      data: {
+          labels: ['Hadir', 'Spoof'],
+          datasets: [{
+              data: [hadir, spoof],
+              backgroundColor: ['#2ecc71', '#e74c3c']
+          }]
+      },
+      options: {
+          plugins: {
+              legend: {
+                  position: 'bottom'
+              }
+          }
+      }
+  });
+</script>

@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <title>FaceAttend VC</title>
+  </head>
+  <body>
+    <h2>Halo, {{ nama }}</h2>
+    <a href="/logout">Logout</a>
+
+    <h3>Video Conference</h3>
+
+    <iframe src="https://meet.jit.si/AbsensiKelas123" width="600" height="400">
+    </iframe>
+    <button onclick="absen()">Absen Masuk</button>
+
+    <script>
+      function absen() {
+        fetch("/absen", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: "nim=22001&status=hadir&keterangan=real face",
+        }).then(() => alert("Absensi berhasil"));
+      }
+    </script>
+    <br /><br />
+
+    <button onclick="absen()">Absen Sekarang</button>
+
+    <script>
+      function absen() {
+        fetch("/absen", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: "status=real",
+        }).then(() => alert("Absensi berhasil"));
+      }
+    </script>
+  </body>
+</html>

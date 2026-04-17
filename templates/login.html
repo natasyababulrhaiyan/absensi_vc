@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+  <head>
+    <title>FaceAttend VC</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
+      link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
+  </head>
+  <body class="login-page">
+    <div class="login-card">
+      <img src="/static/logo.png" class="logo" />
+
+      <h2>FaceAttend VC</h2>
+      <p>Face Recognition & Liveness Detection</p>
+
+      <form method="POST">
+        <div class="input-group">
+          <i class="fa fa-user"></i>
+          <input type="text" name="nim" placeholder="Masukkan NIM" required />
+        </div>
+
+        <div class="input-group">
+          <i class="fa fa-lock"></i>
+          <input
+            type="password"
+            id="password"
+            name="password"
+            placeholder="Masukkan Password"
+            required
+          />
+          <i class="fa fa-eye toggle" onclick="togglePassword()"></i>
+        </div>
+
+        <button type="submit">Login</button>
+      </form>
+    </div>
+
+    <script>
+      function togglePassword() {
+        const pass = document.getElementById("password");
+        const icon = document.querySelector(".toggle");
+
+        if (pass.type === "password") {
+          pass.type = "text";
+          icon.classList.remove("fa-eye");
+          icon.classList.add("fa-eye-slash");
+        } else {
+          pass.type = "password";
+          icon.classList.remove("fa-eye-slash");
+          icon.classList.add("fa-eye");
+        }
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>FaceAttend VC</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+</head>
+<body class="admin-page">
+
+<div class="layout">
+
+    <!-- SIDEBAR -->
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <img src="/static/logo.png" class="logo-sidebar">
+            <h2></h2>
+        </div>
+
+        <ul>
+            <li>
+                <i class="fa fa-home"></i>
+                <a href="/admin">Dashboard</a>
+            </li>
+            <li class="active">
+                <i class="fa fa-table"></i>
+                Data Absensi
+            </li>
+            <li>
+                <i class="fa fa-sign-out-alt"></i>
+                <a href="/logout">Logout</a>
+            </li>
+        </ul>
+    </div>
+
+    <!-- MAIN -->
+    <div class="main">
+
+        <!-- HEADER -->
+        <div class="header">
+            <h2>Data Absensi</h2>
+        </div>
+
+        <div class="content">
+
+            <!-- FILTER TANGGAL -->
+            <div class="card">
+                <form method="POST">
+                    <label>Pilih Tanggal:</label><br><br>
+                    
+                </form>
+            </div>
+
+            <!-- TABEL -->
+            <div class="card">
+                <h3>Data Kehadiran</h3>
+
+                <table>
+                    <tr>
+                        <th>No</th>
+                        <th>NIM</th>
+                        <th>Nama</th>
+                        <th>Masuk</th>
+                        <th>Keluar</th>
+                        <th>Status</th>
+                        <th>Keterangan</th>
+                    </tr>
+
+                    {% for d in data %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ d.nim }}</td>
+                        <td>{{ d.nama }}</td>
+                        <td>{{ d.waktu_masuk }}</td>
+                        <td>{{ d.waktu_keluar }}</td>
+                        <td class="{{ d.status }}">{{ d.status }}</td>
+                        <td>{{ d.keterangan }}</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</div>
+
+</body>
+</html>
