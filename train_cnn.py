@@ -1,18 +1,23 @@
 """
-train_cnn.py  v2
+train_cnn.py  v3
 Training Face Recognition dengan CNN + Transfer Learning (MobileNetV2)
-2 fase training:
-  Phase 1 - Train head saja (base frozen)
-  Phase 2 - Fine-tune 40 layer terakhir MobileNetV2 (LR sangat kecil)
-Fix:
-  - CLAHE preprocessing untuk normalisasi pencahayaan
-  - Tidak ada horizontal_flip
-  - Label smoothing mencegah model collapse ke 1 kelas
+
+Perbaikan dari v2 (point 1-8):
+  1. RGB ASLI (bukan grayscale -> fake RGB)
+  2. IMG_SIZE 160 (lebih cocok dengan MobileNetV2 pretrained)
+  3. Skip gambar yang tidak terdeteksi wajah (tidak fallback ke full image)
+  4. BatchNorm di base MobileNetV2 selalu di-freeze saat fine-tuning
+  5. Augmentasi DULU, preprocess_input BELAKANGAN (lewat preprocessing_function)
+  6. class_weight='balanced' untuk kebal terhadap dataset tidak seimbang
+  7. MTCNN sebagai detector utama (fallback Haar Cascade jika tidak ada)
+  8. Head model disederhanakan: Dense -> ReLU -> Dropout (tanpa BN, dengan L2)
 """
 
 import os, cv2, numpy as np, pickle
+import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (GlobalAveragePooling2D, Dense,
                                      Dropout, BatchNormalization)
@@ -24,91 +29,144 @@ from tensorflow.keras.callbacks import (EarlyStopping, ModelCheckpoint,
                                         ReduceLROnPlateau)
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy
+from tensorflow.keras.regularizers import l2
 
 # ============================================================
-# Config — HARUS SAMA dengan prediksi_cnn.py
+# Config  HARUS SAMA dengan prediksi_cnn.py
 # ============================================================
 DATASET_PATH       = 'Dataset/Dataset_wajah'
 MODEL_SAVE_PATH    = 'model/cnn_model.keras'
 LABEL_ENCODER_PATH = 'model/label_encoder_cnn.pickle'
-IMG_SIZE           = 96      # Input MobileNetV2
-BATCH_SIZE         = 16
+IMG_SIZE           = 160     # MobileNetV2 jauh lebih baik di >=160
+BATCH_SIZE         = 32      # Dataset 100/orang sudah cukup untuk batch besar
 EPOCHS             = 50
 
 os.makedirs('model', exist_ok=True)
 
 # ============================================================
-# Helper: CLAHE (normalisasi kontras/pencahayaan)
+# Face Detector: MTCNN (akurat) dengan fallback Haar Cascade
 # ============================================================
-clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+try:
+    from mtcnn import MTCNN
+    HAS_MTCNN = True
+    print("[INFO] MTCNN tersedia -> akan dipakai untuk crop wajah training.")
+    mtcnn_detector = MTCNN()
+except Exception:
+    HAS_MTCNN = False
+    print("[WARN] MTCNN tidak terinstall. Pakai Haar Cascade (kurang akurat).")
+    print("[WARN] Untuk akurasi terbaik, install: pip install mtcnn")
 
-def preprocess_face(face_gray):
-    """Equalize histogram → resize → convert ke RGB → preprocess_input."""
-    face_eq  = clahe.apply(face_gray)                          # CLAHE
-    face_rgb = cv2.cvtColor(face_eq, cv2.COLOR_GRAY2BGR)
-    face_rs  = cv2.resize(face_rgb, (IMG_SIZE, IMG_SIZE))
-    face_f32 = face_rs.astype("float32")
-    return preprocess_input(face_f32)                          # skala [-1,1]
-
-# ============================================================
-# Load Haar Cascade
-# ============================================================
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 )
+
+def detect_face_box(img_rgb):
+    """
+    Return (x, y, w, h) wajah TERBESAR di gambar RGB,
+    atau None jika tidak ada wajah terdeteksi.
+    """
+    h_img, w_img = img_rgb.shape[:2]
+
+    if HAS_MTCNN:
+        results = mtcnn_detector.detect_faces(img_rgb)
+        if not results:
+            return None
+        results.sort(key=lambda r: r['box'][2] * r['box'][3], reverse=True)
+        x, y, w, h = results[0]['box']
+        x, y = max(0, x), max(0, y)
+        w = min(w, w_img - x)
+        h = min(h, h_img - y)
+        if w <= 0 or h <= 0:
+            return None
+        return (x, y, w, h)
+
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    faces = face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
+    )
+    if len(faces) == 0:
+        return None
+    return tuple(max(faces, key=lambda r: r[2] * r[3]))
+
+# ============================================================
+# CLAHE pada gambar BERWARNA (channel L pada LAB) -> aman warna
+# ============================================================
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+def clahe_color(img_rgb):
+    """Equalize kontras tanpa merusak warna (CLAHE pada channel L LAB)."""
+    lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    l_eq = clahe.apply(l)
+    lab_eq = cv2.merge([l_eq, a, b])
+    return cv2.cvtColor(lab_eq, cv2.COLOR_LAB2RGB)
+
+def preprocess_face(face_rgb):
+    """CLAHE -> resize. TIDAK pakai preprocess_input di sini.
+    preprocess_input dipanggil belakangan oleh ImageDataGenerator
+    (preprocessing_function) supaya augmentasi terjadi di range [0,255]."""
+    face_eq = clahe_color(face_rgb)
+    face_rs = cv2.resize(face_eq, (IMG_SIZE, IMG_SIZE),
+                         interpolation=cv2.INTER_AREA)
+    return face_rs.astype('float32')   # tetap di range [0, 255]
 
 # ============================================================
 # Load Dataset
 # ============================================================
 def load_data(dataset_path):
     data, labels = [], []
-    total_fallback = 0
+    total_skipped = 0
 
-    print("[INFO] Memuat dataset...")
+    print("[INFO] Memuat dataset (RGB + face detector)...")
     for person_name in sorted(os.listdir(dataset_path)):
         person_path = os.path.join(dataset_path, person_name)
         if not os.path.isdir(person_path):
             continue
 
-        count, fallback = 0, 0
+        count, skipped = 0, 0
         for fname in os.listdir(person_path):
-            if not fname.lower().endswith(('.jpg','.jpeg','.png','.bmp')):
-                continue
-            img = cv2.imread(os.path.join(person_path, fname))
-            if img is None:
+            if not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
                 continue
 
-            gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(
-                gray, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30)
-            )
+            img_bgr = cv2.imread(os.path.join(person_path, fname))
+            if img_bgr is None:
+                continue
 
-            if len(faces) > 0:
-                # Ambil wajah terbesar
-                (x, y, w, h) = max(faces, key=lambda r: r[2]*r[3])
-                pad = int(min(w, h) * 0.1)
-                x1,y1 = max(0,x-pad), max(0,y-pad)
-                x2,y2 = min(gray.shape[1],x+w+pad), min(gray.shape[0],y+h+pad)
-                face_roi = gray[y1:y2, x1:x2]
-            else:
-                face_roi = gray   # fallback pakai gambar utuh
-                fallback += 1
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            box = detect_face_box(img_rgb)
 
-            processed = preprocess_face(face_roi)
-            data.append(processed)
+            if box is None:
+                skipped += 1   # JANGAN dipakai (tidak fallback ke full image)
+                continue
+
+            (x, y, w, h) = box
+            pad = int(min(w, h) * 0.12)
+            x1 = max(0, x - pad)
+            y1 = max(0, y - pad)
+            x2 = min(img_rgb.shape[1], x + w + pad)
+            y2 = min(img_rgb.shape[0], y + h + pad)
+            face_roi = img_rgb[y1:y2, x1:x2]
+
+            if face_roi.size == 0:
+                skipped += 1
+                continue
+
+            data.append(preprocess_face(face_roi))
             labels.append(person_name)
             count += 1
 
-        total_fallback += fallback
-        flag = "[!]" if fallback > count * 0.3 else "[OK]"
-        print(f"  {flag} {person_name:<38} | {count} gambar | fallback: {fallback}")
+        total_skipped += skipped
+        flag = "[OK]" if count > 0 else "[!!]"
+        print(f"  {flag} {person_name:<38} | dipakai: {count:3d} | "
+              f"di-skip (tanpa wajah): {skipped}")
 
-    print(f"\n[INFO] Total: {len(data)} gambar | "
-          f"Fallback (tanpa deteksi): {total_fallback}")
-    return np.array(data), np.array(labels)
+    print(f"\n[INFO] Total dipakai: {len(data)} gambar | "
+          f"total di-skip: {total_skipped}")
+    return np.array(data, dtype='float32'), np.array(labels)
+
 
 data, labels = load_data(DATASET_PATH)
-print(f"[INFO] Shape data: {data.shape}")
+print(f"[INFO] Shape data: {data.shape}  (range [0,255] sebelum augmentasi)")
 
 # ============================================================
 # Encode Label
@@ -118,7 +176,7 @@ y  = le.fit_transform(labels)
 Y  = to_categorical(y)
 NUM_CLASSES = len(le.classes_)
 
-print(f"[INFO] Jumlah kelas: {NUM_CLASSES} → {list(le.classes_)}")
+print(f"[INFO] Jumlah kelas: {NUM_CLASSES} -> {list(le.classes_)}")
 
 with open(LABEL_ENCODER_PATH, 'wb') as f:
     pickle.dump(le, f)
@@ -133,21 +191,39 @@ X_train, X_val, y_train, y_val = train_test_split(
 print(f"[INFO] Train: {len(X_train)} | Val: {len(X_val)}")
 
 # ============================================================
-# Data Augmentation (TANPA horizontal_flip!)
+# Class Weight (kebal terhadap kelas tidak seimbang)
+# ============================================================
+y_train_int = y_train.argmax(axis=1)
+cw_array = compute_class_weight(
+    class_weight='balanced',
+    classes=np.unique(y_train_int),
+    y=y_train_int
+)
+class_weight_dict = {i: w for i, w in enumerate(cw_array)}
+print(f"[INFO] class_weight: {class_weight_dict}")
+
+# ============================================================
+# Data Augmentation
+#   - Augmentasi DULU di range [0,255]
+#   - preprocess_input dipanggil BELAKANGAN via preprocessing_function
+#   - Validation diproses manual (tanpa augmentasi)
 # ============================================================
 datagen = ImageDataGenerator(
     rotation_range=12,
     width_shift_range=0.08,
     height_shift_range=0.08,
     zoom_range=0.10,
-    brightness_range=[0.75, 1.25],
-    horizontal_flip=False,       # ← JANGAN flip wajah
-    fill_mode='nearest'
+    brightness_range=[0.85, 1.15],
+    horizontal_flip=False,           # JANGAN flip wajah (asimetri penting)
+    fill_mode='nearest',
+    preprocessing_function=preprocess_input   # dipanggil PALING AKHIR
 )
-datagen.fit(X_train)
+
+X_val_pre = preprocess_input(X_val.copy())   # validation: langsung preprocess
 
 # ============================================================
 # Bangun Model CNN (MobileNetV2 sebagai feature extractor)
+# Head disederhanakan: Dense -> ReLU -> Dropout (tanpa BN, dengan L2)
 # ============================================================
 print("[INFO] Membangun model...")
 base = MobileNetV2(
@@ -155,27 +231,22 @@ base = MobileNetV2(
     include_top=False,
     weights='imagenet'
 )
-base.trainable = False   # freeze semua — hanya training head
+base.trainable = False   # Phase 1: hanya training head
 
 x = base.output
 x = GlobalAveragePooling2D()(x)
-x = Dense(512, activation='relu')(x)
-x = BatchNormalization()(x)
-x = Dropout(0.4)(x)
-x = Dense(256, activation='relu')(x)
-x = BatchNormalization()(x)
+x = Dropout(0.3)(x)
+x = Dense(256, activation='relu', kernel_regularizer=l2(1e-4))(x)
 x = Dropout(0.3)(x)
 out = Dense(NUM_CLASSES, activation='softmax')(x)
 
 model = Model(inputs=base.input, outputs=out)
 
-# Label smoothing mencegah model 100% confident ke 1 kelas
 model.compile(
     optimizer=Adam(learning_rate=1e-3),
-    loss=CategoricalCrossentropy(label_smoothing=0.1),
+    loss=CategoricalCrossentropy(label_smoothing=0.05),
     metrics=['accuracy']
 )
-
 model.summary()
 
 # ============================================================
@@ -183,75 +254,74 @@ model.summary()
 # ============================================================
 print("\n[PHASE 1] Training classification head (base frozen)...")
 callbacks_p1 = [
-    EarlyStopping(
-        monitor='val_accuracy', patience=8,
-        restore_best_weights=True, verbose=1
-    ),
-    ModelCheckpoint(
-        MODEL_SAVE_PATH, monitor='val_accuracy',
-        save_best_only=True, verbose=1
-    ),
-    ReduceLROnPlateau(
-        monitor='val_loss', factor=0.5,
-        patience=4, min_lr=1e-6, verbose=1
-    )
+    EarlyStopping(monitor='val_accuracy', patience=8,
+                  restore_best_weights=True, verbose=1),
+    ModelCheckpoint(MODEL_SAVE_PATH, monitor='val_accuracy',
+                    save_best_only=True, verbose=1),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                      patience=4, min_lr=1e-6, verbose=1)
 ]
 
 history1 = model.fit(
-    datagen.flow(X_train, y_train, batch_size=BATCH_SIZE),
-    validation_data=(X_val, y_val),
+    datagen.flow(X_train, y_train, batch_size=BATCH_SIZE, shuffle=True),
+    validation_data=(X_val_pre, y_val),
     steps_per_epoch=max(1, len(X_train) // BATCH_SIZE),
     epochs=EPOCHS,
+    class_weight=class_weight_dict,
     callbacks=callbacks_p1
 )
 
-loss1, acc1 = model.evaluate(X_val, y_val, verbose=0)
+loss1, acc1 = model.evaluate(X_val_pre, y_val, verbose=0)
 print(f"\n[Phase 1 Result] Val Accuracy: {acc1*100:.2f}%")
 
 # ============================================================
-# Phase 2: Fine-tuning — unfreeze 40 layer terakhir MobileNetV2
-# Ini yang membuat model belajar fitur WAJAH, bukan fitur generik
+# Phase 2: Fine-tuning  unfreeze 40 layer terakhir MobileNetV2
+# PENTING: BatchNorm SELALU di-freeze (training=False) supaya
+# running mean/var tidak rusak karena batch kecil.
 # ============================================================
 print("\n[PHASE 2] Fine-tuning 40 layer terakhir MobileNetV2...")
 base.trainable = True
-# Freeze semua kecuali 40 layer terakhir
 for layer in base.layers[:-40]:
     layer.trainable = False
 
-# Harus compile ulang setelah mengubah trainable
+frozen_bn = 0
+for layer in base.layers:
+    if isinstance(layer, BatchNormalization):
+        layer.trainable = False
+        frozen_bn += 1
+print(f"[INFO] Total BatchNorm di base yang di-freeze: {frozen_bn}")
+
+trainable_layers = sum(1 for l in base.layers if l.trainable)
+print(f"[INFO] Trainable layer di base: {trainable_layers} dari {len(base.layers)}")
+
 model.compile(
-    optimizer=Adam(learning_rate=1e-5),   # LR sangat kecil!
-    loss=CategoricalCrossentropy(label_smoothing=0.1),
+    optimizer=Adam(learning_rate=1e-5),
+    loss=CategoricalCrossentropy(label_smoothing=0.05),
     metrics=['accuracy']
 )
 
 callbacks_p2 = [
-    EarlyStopping(
-        monitor='val_accuracy', patience=10,
-        restore_best_weights=True, verbose=1
-    ),
-    ModelCheckpoint(
-        MODEL_SAVE_PATH, monitor='val_accuracy',
-        save_best_only=True, verbose=1
-    ),
-    ReduceLROnPlateau(
-        monitor='val_loss', factor=0.5,
-        patience=5, min_lr=1e-8, verbose=1
-    )
+    EarlyStopping(monitor='val_accuracy', patience=10,
+                  restore_best_weights=True, verbose=1),
+    ModelCheckpoint(MODEL_SAVE_PATH, monitor='val_accuracy',
+                    save_best_only=True, verbose=1),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                      patience=5, min_lr=1e-8, verbose=1)
 ]
 
 history2 = model.fit(
-    datagen.flow(X_train, y_train, batch_size=BATCH_SIZE),
-    validation_data=(X_val, y_val),
+    datagen.flow(X_train, y_train, batch_size=BATCH_SIZE, shuffle=True),
+    validation_data=(X_val_pre, y_val),
     steps_per_epoch=max(1, len(X_train) // BATCH_SIZE),
     epochs=EPOCHS,
+    class_weight=class_weight_dict,
     callbacks=callbacks_p2
 )
 
 # ============================================================
 # Evaluasi Final
 # ============================================================
-loss2, acc2 = model.evaluate(X_val, y_val, verbose=0)
+loss2, acc2 = model.evaluate(X_val_pre, y_val, verbose=0)
 print(f"\n{'='*50}")
 print(f"[Phase 1] Val Accuracy : {acc1*100:.2f}%")
 print(f"[Phase 2] Val Accuracy : {acc2*100:.2f}%  <-- setelah fine-tune")
