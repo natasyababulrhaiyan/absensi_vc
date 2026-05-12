@@ -237,20 +237,53 @@ class_weight_dict = {i: w for i, w in enumerate(cw_array)}
 print(f"[INFO] class_weight: {class_weight_dict}")
 
 # ============================================================
-# Data Augmentation
-#   - Augmentasi DULU di range [0,255]
-#   - preprocess_input dipanggil BELAKANGAN via preprocessing_function
-#   - Validation diproses manual (tanpa augmentasi)
+# Data Augmentation (v4: lebih agresif untuk generalisasi ke webcam)
+#   - Augmentasi geometri di range [0,255]
+#   - Tambahan augmentasi piksel (blur, noise, random erasing)
+#     dilakukan di `aug_then_preprocess` lalu preprocess_input
+#   - horizontal_flip=True (standar di face recognition modern)
+#   - Validation diproses manual TANPA augmentasi
 # ============================================================
+def aug_then_preprocess(img):
+    """
+    Dipanggil oleh ImageDataGenerator paling akhir.
+    img: float32 array (H, W, 3), range [0, 255] setelah aug geometri.
+    Tambah: Gaussian blur, noise, random erasing -> paksa model belajar
+    fitur wajah yang invariant ke kondisi pencahayaan/kamera, dan tidak
+    bergantung pada 1 region (rambut/baju/mulut saja).
+    """
+    img = img.astype('float32')
+
+    if np.random.random() < 0.30:
+        ksize = int(np.random.choice([3, 5]))
+        img = cv2.GaussianBlur(img, (ksize, ksize), 0)
+
+    if np.random.random() < 0.25:
+        noise = np.random.normal(0.0, 8.0, img.shape).astype('float32')
+        img = np.clip(img + noise, 0.0, 255.0)
+
+    if np.random.random() < 0.25:
+        h, w = img.shape[:2]
+        eh = np.random.randint(max(1, h // 8), max(2, h // 4))
+        ew = np.random.randint(max(1, w // 8), max(2, w // 4))
+        ey = np.random.randint(0, max(1, h - eh))
+        ex = np.random.randint(0, max(1, w - ew))
+        img[ey:ey + eh, ex:ex + ew] = np.random.uniform(
+            0.0, 255.0, (eh, ew, img.shape[2])
+        ).astype('float32')
+
+    return preprocess_input(img)
+
+
 datagen = ImageDataGenerator(
-    rotation_range=12,
-    width_shift_range=0.08,
-    height_shift_range=0.08,
-    zoom_range=0.10,
-    brightness_range=[0.85, 1.15],
-    horizontal_flip=False,           # JANGAN flip wajah (asimetri penting)
+    rotation_range=15,
+    width_shift_range=0.10,
+    height_shift_range=0.10,
+    zoom_range=0.15,
+    brightness_range=[0.7, 1.3],     # lebih lebar -> tahan kondisi kamera
+    horizontal_flip=True,            # standar face recognition (FaceNet/ArcFace)
     fill_mode='nearest',
-    preprocessing_function=preprocess_input   # dipanggil PALING AKHIR
+    preprocessing_function=aug_then_preprocess
 )
 
 X_val_pre = preprocess_input(X_val.copy())   # validation: langsung preprocess
