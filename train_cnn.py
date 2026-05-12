@@ -244,7 +244,7 @@ model = Model(inputs=base.input, outputs=out)
 
 model.compile(
     optimizer=Adam(learning_rate=1e-3),
-    loss=CategoricalCrossentropy(label_smoothing=0.05),
+    loss=CategoricalCrossentropy(label_smoothing=0.02),
     metrics=['accuracy']
 )
 model.summary()
@@ -296,7 +296,7 @@ print(f"[INFO] Trainable layer di base: {trainable_layers} dari {len(base.layers
 
 model.compile(
     optimizer=Adam(learning_rate=1e-5),
-    loss=CategoricalCrossentropy(label_smoothing=0.05),
+    loss=CategoricalCrossentropy(label_smoothing=0.02),
     metrics=['accuracy']
 )
 

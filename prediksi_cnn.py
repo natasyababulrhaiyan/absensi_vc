@@ -7,6 +7,7 @@ Preprocessing HARUS SAMA dengan train_cnn.py:
   - IMG_SIZE 160
   - CLAHE pada channel L (LAB color space)
   - preprocess_input MobileNetV2 dipanggil paling akhir
+  - MTCNN untuk crop real-time agar konsisten dengan training
 """
 
 import cv2, numpy as np, pickle
@@ -20,8 +21,48 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 MODEL_PATH           = 'model/cnn_model.keras'
 LABEL_ENCODER_PATH   = 'model/label_encoder_cnn.pickle'
 IMG_SIZE             = 160
-CONFIDENCE_THRESHOLD = 0.70   # 70%  ubah dengan +/-
+CONFIDENCE_THRESHOLD = 0.50   # sementara 50%; naikkan jika false-positive
 BUFFER_SIZE          = 7      # frame voting untuk stabilitas
+
+# ============================================================
+# Face Detector: MTCNN utama, fallback Haar Cascade
+# ============================================================
+try:
+    from mtcnn import MTCNN
+    HAS_MTCNN = True
+    mtcnn_detector = MTCNN()
+    print("[INFO] MTCNN tersedia -> dipakai untuk deteksi wajah real-time.")
+except Exception:
+    HAS_MTCNN = False
+    print("[WARN] MTCNN tidak terinstall. Pakai Haar Cascade.")
+    print("[WARN] Install untuk crop lebih konsisten: python -m pip install mtcnn")
+
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+)
+
+def detect_faces(frame_rgb, gray):
+    """Return list box wajah (x, y, w, h), diprioritaskan dari MTCNN."""
+    h_img, w_img = frame_rgb.shape[:2]
+
+    if HAS_MTCNN:
+        boxes = []
+        for result in mtcnn_detector.detect_faces(frame_rgb):
+            if result.get('confidence', 0) < 0.90:
+                continue
+            x, y, w, h = result['box']
+            x, y = max(0, x), max(0, y)
+            w = min(w, w_img - x)
+            h = min(h, h_img - y)
+            if w > 0 and h > 0:
+                boxes.append((x, y, w, h))
+
+        if boxes:
+            return boxes
+
+    return face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+    )
 
 # ============================================================
 # Load Model & Label Encoder
@@ -61,13 +102,6 @@ def preprocess_face(face_rgb):
     return np.expand_dims(face_pre, axis=0)   # (1, 160, 160, 3)
 
 # ============================================================
-# Haar Cascade (dipakai untuk real-time karena cepat)
-# ============================================================
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-)
-
-# ============================================================
 # Kamera
 # ============================================================
 print("[INFO] Menyalakan kamera...")
@@ -75,6 +109,9 @@ cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("[ERROR] Kamera tidak bisa dibuka!")
     exit()
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 name_buffer  = deque(maxlen=BUFFER_SIZE)
 proba_buffer = deque(maxlen=BUFFER_SIZE)
@@ -88,9 +125,7 @@ while True:
 
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
-    )
+    faces = detect_faces(frame_rgb, gray)
 
     for (x, y, w, h) in faces:
         pad = int(min(w, h) * 0.12)
