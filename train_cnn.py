@@ -40,6 +40,7 @@ LABEL_ENCODER_PATH = 'model/label_encoder_cnn.pickle'
 IMG_SIZE           = 160     # MobileNetV2 jauh lebih baik di >=160
 BATCH_SIZE         = 32      # Dataset 100/orang sudah cukup untuk batch besar
 EPOCHS             = 50
+MAX_DETECTOR_DIM   = 640     # Batasi input MTCNN supaya tidak boros RAM
 
 os.makedirs('model', exist_ok=True)
 
@@ -60,6 +61,28 @@ face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 )
 
+def resize_for_detector(img_rgb):
+    """Resize sementara untuk detector; box nanti dimapping balik ke ukuran asli."""
+    h, w = img_rgb.shape[:2]
+    longest = max(h, w)
+    if longest <= MAX_DETECTOR_DIM:
+        return img_rgb, 1.0
+
+    scale = MAX_DETECTOR_DIM / longest
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    resized = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
+def detect_face_box_haar(img_rgb):
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    faces = face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
+    )
+    if len(faces) == 0:
+        return None
+    return tuple(max(faces, key=lambda r: r[2] * r[3]))
+
 def detect_face_box(img_rgb):
     """
     Return (x, y, w, h) wajah TERBESAR di gambar RGB,
@@ -68,11 +91,28 @@ def detect_face_box(img_rgb):
     h_img, w_img = img_rgb.shape[:2]
 
     if HAS_MTCNN:
-        results = mtcnn_detector.detect_faces(img_rgb)
-        if not results:
-            return None
-        results.sort(key=lambda r: r['box'][2] * r['box'][3], reverse=True)
-        x, y, w, h = results[0]['box']
+        detector_img, scale = resize_for_detector(img_rgb)
+        try:
+            results = mtcnn_detector.detect_faces(detector_img)
+        except Exception as e:
+            print(f"[WARN] MTCNN gagal di 1 gambar ({type(e).__name__}). Fallback Haar.")
+            return detect_face_box_haar(img_rgb)
+
+        if results:
+            confident = [r for r in results if r.get('confidence', 0) >= 0.80]
+            candidates = confident or results
+            candidates.sort(
+                key=lambda r: r.get('confidence', 0) * r['box'][2] * r['box'][3],
+                reverse=True
+            )
+            x, y, w, h = candidates[0]['box']
+            x = int(round(x / scale))
+            y = int(round(y / scale))
+            w = int(round(w / scale))
+            h = int(round(h / scale))
+        else:
+            return detect_face_box_haar(img_rgb)
+
         x, y = max(0, x), max(0, y)
         w = min(w, w_img - x)
         h = min(h, h_img - y)
@@ -80,13 +120,7 @@ def detect_face_box(img_rgb):
             return None
         return (x, y, w, h)
 
-    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
-    )
-    if len(faces) == 0:
-        return None
-    return tuple(max(faces, key=lambda r: r[2] * r[3]))
+    return detect_face_box_haar(img_rgb)
 
 # ============================================================
 # CLAHE pada gambar BERWARNA (channel L pada LAB) -> aman warna

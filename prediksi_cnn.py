@@ -23,6 +23,7 @@ LABEL_ENCODER_PATH   = 'model/label_encoder_cnn.pickle'
 IMG_SIZE             = 160
 CONFIDENCE_THRESHOLD = 0.50   # sementara 50%; naikkan jika false-positive
 BUFFER_SIZE          = 7      # frame voting untuk stabilitas
+MAX_DETECTOR_DIM     = 640    # batasi input MTCNN agar stabil di CPU/RAM
 
 # ============================================================
 # Face Detector: MTCNN utama, fallback Haar Cascade
@@ -41,16 +42,45 @@ face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 )
 
+def resize_for_detector(img_rgb):
+    """Resize sementara untuk detector; box nanti dimapping balik ke frame asli."""
+    h, w = img_rgb.shape[:2]
+    longest = max(h, w)
+    if longest <= MAX_DETECTOR_DIM:
+        return img_rgb, 1.0
+
+    scale = MAX_DETECTOR_DIM / longest
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    resized = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
+def detect_faces_haar(gray):
+    return face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+    )
+
 def detect_faces(frame_rgb, gray):
     """Return list box wajah (x, y, w, h), diprioritaskan dari MTCNN."""
     h_img, w_img = frame_rgb.shape[:2]
 
     if HAS_MTCNN:
+        detector_img, scale = resize_for_detector(frame_rgb)
         boxes = []
-        for result in mtcnn_detector.detect_faces(frame_rgb):
+        try:
+            results = mtcnn_detector.detect_faces(detector_img)
+        except Exception as e:
+            print(f"\n[WARN] MTCNN gagal di frame ({type(e).__name__}). Fallback Haar.")
+            return detect_faces_haar(gray)
+
+        for result in results:
             if result.get('confidence', 0) < 0.90:
                 continue
             x, y, w, h = result['box']
+            x = int(round(x / scale))
+            y = int(round(y / scale))
+            w = int(round(w / scale))
+            h = int(round(h / scale))
             x, y = max(0, x), max(0, y)
             w = min(w, w_img - x)
             h = min(h, h_img - y)
@@ -60,9 +90,7 @@ def detect_faces(frame_rgb, gray):
         if boxes:
             return boxes
 
-    return face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
-    )
+    return detect_faces_haar(gray)
 
 # ============================================================
 # Load Model & Label Encoder
